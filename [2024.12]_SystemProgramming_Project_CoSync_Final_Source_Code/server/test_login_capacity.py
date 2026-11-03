@@ -75,8 +75,10 @@ class CollaborationTest(unittest.TestCase):
         self.state.mkdir()
         self.users = self.state / "user.txt"
         self.users.write_text("returning\n")
-        self.server = subprocess.Popen([build / "server" / "server_app"],
-                                       cwd=self.state, stdout=subprocess.DEVNULL)
+        self.console = self.root / "server-console.txt"
+        with self.console.open("wb") as output:
+            self.server = subprocess.Popen([build / "server" / "server_app"],
+                                           cwd=self.state, stdout=output)
         self.stack.callback(self.server.wait)
         self.stack.callback(self.server.kill)
         deadline = time.monotonic() + 5
@@ -229,6 +231,56 @@ class CollaborationTest(unittest.TestCase):
         _, error = proc.communicate(timeout=5)
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn(b"before replying to login", error)
+
+    def test_terminal_draft_resize_and_command_log(self):
+        import fcntl
+        import pty
+        import struct
+        import termios
+
+        peer = self.first
+        peer.sendall(bytes(Packet(1, b"returning")))
+        self.packet(peer)
+        self.packet(peer)
+        master, slave = pty.openpty()
+        self.stack.callback(os.close, master)
+        self.stack.callback(os.close, slave)
+        def resize(columns):
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, columns, 0, 0))
+        resize(48)
+        proc = subprocess.Popen([self.client], cwd=self.root, stdin=slave, stdout=slave, stderr=slave,
+                                env={**os.environ, "COSYNC_SERVER_ADDR": "127.0.0.1",
+                                     "TERM": "xterm", "LC_ALL": "C.UTF-8"})
+        self.stack.callback(proc.wait)
+        self.stack.callback(proc.kill)
+
+        def read_until(marker):
+            output = b""
+            deadline = time.monotonic() + 5
+            while marker not in output:
+                delay = max(0, deadline - time.monotonic())
+                self.assertTrue(select.select([master], [], [], delay)[0], marker)
+                output += os.read(master, 4096)
+            return output
+
+        read_until(b"Enter your username:")
+        os.write(master, b"cli\n")
+        read_until(b"[cli] : ")
+        os.write(master, b"/lo")
+        read_until(b"/lo")
+        resize(32)
+        peer.sendall(bytes(Packet(1, b"", "가".encode())))
+        # 2 Korean cells + 3 separator cells + 11 cells for [returning].
+        read_until(b" " * 15 + "가 : [returning]".encode())
+        os.write(master, b"g\n\nnext\n")
+        self.assertEqual(self.packet(peer).message, b"next")
+        read_until(b"[Version_Log]")
+        self.wait_until(lambda: "[Chat] cli: next" in self.console.read_text())
+        self.assertIn("[Command] /log sent to cli.", self.console.read_text())
+        self.assertIn("[Chat] cli: next", self.console.read_text())
+        self.assertIn("cli, next\n", (self.state / "chat_log.txt").read_text())
+        os.write(master, b"/quit\n")
+        self.assertEqual(proc.wait(timeout=5), 0)
 
     def test_real_client_file_events(self):
         peer = self.first

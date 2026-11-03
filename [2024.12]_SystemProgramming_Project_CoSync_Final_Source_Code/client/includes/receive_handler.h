@@ -6,7 +6,6 @@
 #define RECEIVE_HANDLER_H
 #include "common.h"
 
-/* Apply incoming packets until the server disconnects or the session stops. */
-int receive_server_packets(void);
+int display_server_packet(const Packet *packet);
 void print_right_aligned(const char *name, const char *message);
 #endif

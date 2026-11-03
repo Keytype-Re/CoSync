@@ -15,7 +15,7 @@ all: $(TARGET)
 
 # 실행 파일 빌드
 $(TARGET): $(OBJ)
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -o $@ $^ -lreadline
 
 $(OBJ): ../protocol.h
 
@@ -35,7 +35,7 @@ file_monitor.o: file_monitor.c includes/file_monitor.h includes/common.h
 receive_handler.o: receive_handler.c includes/receive_handler.h includes/file_monitor.h includes/common.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
-send_handler.o: send_handler.c includes/send_handler.h includes/file_monitor.h includes/common.h
+send_handler.o: send_handler.c includes/receive_handler.h includes/send_handler.h includes/file_monitor.h includes/common.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 # 클린업

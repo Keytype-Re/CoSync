@@ -3,7 +3,11 @@
  */
 
 #include <errno.h>
+#include <poll.h>
+#include <stdlib.h>
 #include <stdio.h>
+#include <readline/readline.h>
+#include "includes/receive_handler.h"
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -18,6 +22,7 @@ static void change_file(const char *path)
     if (result == 0) result = store_text_file(SHARED_FILE, data, 0);
     pthread_mutex_unlock(&file_mutex);
     if (result < 0) perror(path ? path : SHARED_FILE);
+    else puts(path ? "Loaded shared file." : "Cleared shared file.");
 }
 
 static void handle_line(const char *line)
@@ -41,94 +46,118 @@ static void handle_line(const char *line)
             return;
         }
         packet.flag = COMMAND;
-    } else packet.flag = !strcmp(line, "/log") ? COMMAND : CHAT;
+    } else if (!strcmp(line, "/log")) packet.flag = COMMAND;
+    else packet.flag = CHAT;
     strcpy(packet.message, line);
     send_packet(&packet);
 }
 
-void *send_terminal_packet(void *arg)
+static void submit_line(char *line)
 {
-    (void)arg;
-    char line[BUFFER_SIZE];
-    size_t used = 0;
-    int too_long = 0;
-    printf("[%s] : ", username);
-    fflush(stdout);
-    while (wait_for_input(STDIN_FILENO)) {
-        char c;
-        ssize_t n = read(STDIN_FILENO, &c, 1);
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) {
-            if (n == 0 && used && !too_long) {
-                line[used] = 0;
-                handle_line(line);
+    size_t length = strlen(line);
+    if (length && line[length - 1] == '\r') line[--length] = 0;
+    if (length >= BUFFER_SIZE) {
+        fprintf(stderr, "Input exceeds the packet limit.\n");
+        return;
+    }
+    if (*line == '/') {
+        while (length && (line[length - 1] == ' ' || line[length - 1] == '\t'))
+            line[--length] = 0;
+    }
+    if (length) handle_line(line);
+}
+
+static void edited_line(char *line)
+{
+    if (line) submit_line(line);
+    else stop_client();
+    free(line);
+}
+
+/* poll() keeps a partial network frame from blocking the next keystroke. */
+int run_chat_ui(void)
+{
+    int interactive = isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
+    char prompt[sizeof(username) + 8];
+    snprintf(prompt, sizeof(prompt), "[%s] : ", username);
+    if (interactive) rl_callback_handler_install(prompt, edited_line);
+
+    struct pollfd events[] = {{STDIN_FILENO, POLLIN, 0}, {client_socket, POLLIN, 0},
+                              {stop_pipe[0], POLLIN, 0}};
+    Packet incoming;
+    size_t received = 0, used = 0;
+    char line[BUFFER_SIZE + 1];
+    int oversized = 0;
+    int result = 0;
+    while (keep_running) {
+        int ready = poll(events, 3, -1);
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready < 0) { perror("poll"); result = -1; break; }
+        if (events[2].revents) break;
+        if (events[1].revents) {
+            ssize_t n = recv(client_socket, (char *)&incoming + received,
+                             sizeof(incoming) - received, MSG_DONTWAIT);
+            if (n < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+            if (n <= 0) {
+                fprintf(stderr, "Disconnected from server.\n");
+                result = -1;
+                break;
             }
-            break;
+            received += n;
+            if (received == sizeof(incoming)) {
+                int redraw = interactive && incoming.flag != FILE_UPDATE;
+                if (redraw) rl_clear_visible_line();
+                result = display_server_packet(&incoming);
+                if (result < 0) break;
+                if (redraw) { rl_on_new_line(); rl_redisplay(); }
+                fflush(stdout);
+                received = 0;
+            }
         }
-        if (c != '\n') {
-            if (used < sizeof(line) - 1) line[used++] = c;
-            else too_long = 1;
-            continue;
+        if (events[0].revents) {
+            if (interactive) {
+                rl_callback_read_char();
+                continue;
+            }
+            char c;
+            ssize_t n = read(STDIN_FILENO, &c, 1);
+            if (n < 0 && errno == EINTR) continue;
+            if (n < 0) { perror("stdin"); result = -1; break; }
+            if (!n || c == '\n') {
+                line[used] = 0;
+                if (oversized) fprintf(stderr, "Input exceeds the packet limit.\n");
+                else submit_line(line);
+                used = 0;
+                oversized = 0;
+                if (!n) break;
+            } else if (used < BUFFER_SIZE) line[used++] = c;
+            else oversized = 1;
         }
-        line[used] = 0;
-        if (too_long) fprintf(stderr, "Input exceeds the packet limit.\n");
-        else handle_line(line);
-        used = 0;
-        too_long = 0;
-        if (!keep_running) break;
-        printf("[%s] : ", username);
-        fflush(stdout);
     }
-    stop_client();
-    return NULL;
+    if (interactive) rl_callback_handler_remove();
+    return result;
 }
 
-void print_centered(const char *text, int width) {
-    int len = strlen(text);
-    int padding = (width - len) / 2;
-    if (padding < 0) padding = 0; // Prevent negative padding
-    for (int i = 0; i < padding; i++) {
-        printf(" ");
-    }
-    printf("%s\n", text);
+int terminal_columns(void)
+{
+    struct winsize size;
+    return ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0 && size.ws_col ? size.ws_col : 80;
 }
 
-void command_help() {
-	struct winsize w = {.ws_col = 80};
-    ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
-    int term_width = w.ws_col; // Get terminal width
-
-    // 메뉴 상단
-    printf("%.*s\n", 102, "==========================================================================================================================================\n");
-    print_centered("COMMAND HELP MENU", term_width);
-    printf("%.*s\n", 102, "==========================================================================================================================================\n");
-
-    // 테이블 헤더
-    printf("| %-19s | %-76s |\n", "Command", "Description");
-    printf("%.*s\n", 102, "--------------------------------------------------------------------------------------------------------------------------------------------\n");
-
-    // 명령어 목록
-    printf("| %-19s | %-76s |\n", "/new", "Create a new shared file session");
-    printf("| %-19s | %-76s |\n", "/load (filepath)", "Load an existing file to shared file session");
-    printf("| %-19s | %-76s |\n", "/commit", "Commit shared file to the server");
-    printf("| %-19s | %-76s |\n", "/rebase (version)", "Rebase to the file");
-    printf("| %-19s | %-76s |\n", "/quit", "Exit the program");
-    printf("| %-19s | %-76s |\n", "/help", "Show this help menu");
-
-    // 메뉴 중간
-    printf("%.*s\n", 102, "==========================================================================================================================================\n");
-    print_centered("NOTICE", term_width);
-    printf("%.*s\n", 102, "==========================================================================================================================================\n");
-
-    // 공지 사항
-    printf("| %-98s |\n", "1. Use commands with correct arguments.");
-    printf("| %-98s |\n", "2. You should save the shared file before using any instructions.");
-
-    printf("| %-19s | %-76s |\n", "/log", "Show saved versions");
-
-    // 메뉴 하단
-    printf("%.*s\n", 102, "==========================================================================================================================================\n");
-    puts("");
+void print_centered(const char *text, int width)
+{
+    int padding = (width - (int)strlen(text)) / 2;
+    printf("%*s%s\n", padding > 0 ? padding : 0, "", text);
 }
 
-//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+void command_help(void)
+{
+    puts("[Commands]");
+    puts("/new          Clear shared file");
+    puts("/load PATH    Load a text file");
+    puts("/commit       Save a version");
+    puts("/log          List versions");
+    puts("/rebase N     Restore version N");
+    puts("/quit         Disconnect");
+    puts("/help         Show commands");
+}

@@ -2,7 +2,10 @@
  * @author 2023016057 조신근
  */
 
+#define _XOPEN_SOURCE 700
 #include <arpa/inet.h>
+#include <locale.h>
+#include <wchar.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,7 +19,6 @@
 #include "includes/send_handler.h"
 
 void print_init_logo(void);
-void get_terminal_size(int *cols);
 
 static int connect_server(void)
 {
@@ -144,6 +146,7 @@ static int receive_initial_data(void)
         char *comma = strchr(line, ',');
         if (!comma) continue;
         *comma++ = 0;
+        if (*comma == ' ') comma++;
         if (!strcmp(username, line)) printf("[%s] : %s\n", line, comma);
         else print_right_aligned(line, comma);
     }
@@ -155,12 +158,10 @@ static int run_session(void)
     int monitor = init_inotify();
     if (monitor < 0) { perror("inotify"); return -1; }
     if (pipe(stop_pipe) < 0) { close(monitor); return -1; }
-    pthread_t watcher, terminal;
+    pthread_t watcher;
     int watching = pthread_create(&watcher, NULL, watch_file, &monitor) == 0;
-    int reading = watching && pthread_create(&terminal, NULL, send_terminal_packet, NULL) == 0;
-    int result = reading ? receive_server_packets() : -1;
+    int result = watching ? run_chat_ui() : -1;
     stop_client();
-    if (reading) pthread_join(terminal, NULL);
     if (watching) pthread_join(watcher, NULL);
     close(stop_pipe[0]);
     close(monitor);
@@ -170,6 +171,7 @@ static int run_session(void)
 int main(void)
 {
     /* Login reads lines; the terminal thread subsequently polls the same fd. */
+    setlocale(LC_CTYPE, "");
     setvbuf(stdin, NULL, _IONBF, 0);
     int result = -1;
     if (mkdir("./watch", 0700) < 0 && errno != EEXIST) perror("./watch");
@@ -183,12 +185,11 @@ int main(void)
 
 void print_init_logo()
 {
-    struct winsize w = {.ws_col = 80};
-    ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
-    int term_width = w.ws_col; // 터미널 너비 가져오기
+    int term_width = terminal_columns();
+    if (term_width < 62) { puts("CoSync | /help for commands"); return; }
 
     // 상단 구분선
-    printf("%.*s\n", 102, "==========================================================================================================================================\n");
+    printf("%.*s\n", term_width - 1, "==========================================================================================================================================\n");
     
     // 로고 출력 (백슬래시 이스케이프 수정)
     print_centered(" ____               ____                                   ", term_width);
@@ -203,46 +204,41 @@ void print_init_logo()
     print_centered("", term_width);
     
     // 하단 구분선
-    printf("%.*s\n", 102, "==========================================================================================================================================\n");
+    printf("%.*s\n", term_width - 1, "==========================================================================================================================================\n");
     
     // 환영 메시지 및 정보
     print_centered("                 Welcome to the CoSync!                     ", term_width);
-    printf("%.*s\n", 102, "==========================================================================================================================================\n");
+    printf("%.*s\n", term_width - 1, "==========================================================================================================================================\n");
     print_centered("              Version      : 1.0.0                          ", term_width);
     print_centered("              Author       : Third Team                     ", term_width);
     print_centered("              Description  : File Sync with chat            ", term_width);
     print_centered("              Date Created : 2024-12-13                     ", term_width);
-    printf("%.*s\n", 102, "==========================================================================================================================================\n");
+    printf("%.*s\n", term_width - 1, "==========================================================================================================================================\n");
     puts("");
-    printf(">> Insert \"help\" if you want help\n");
+    printf(">> Insert \"/help\" if you want help\n");
     printf(">> Hello! %s\n", username);
 }
 
-void get_terminal_size(int *cols)
-{
-    struct winsize w = {.ws_col = 80};
-    ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
-    *cols = w.ws_col;
-}
-
-// Function to print right-aligned message
+/* Measure display cells rather than UTF-8 bytes when aligning Korean text. */
 void print_right_aligned(const char *name, const char *message)
 {
-    int cols;
-    get_terminal_size(&cols);
-
-    char formatted_message[BUFFER_SIZE + 50 + 4];
-    snprintf(formatted_message, sizeof(formatted_message), "%s : [%s]", message, name);
-
-    int padding = cols - (int)strlen(formatted_message);
-
-
-    if (padding > 0)
-    {
-        for (int i = 0; i < padding; i++)
-        {
-            printf(" ");
+    char text[BUFFER_SIZE + sizeof(username) + 8];
+    snprintf(text, sizeof(text), "%s : [%s]", message, name);
+    mbstate_t state = {0};
+    int cells = 0;
+    for (const char *p = text; *p;) {
+        wchar_t wc;
+        size_t n = mbrtowc(&wc, p, MB_CUR_MAX, &state);
+        if (n == (size_t)-1 || n == (size_t)-2) {
+            memset(&state, 0, sizeof(state));
+            cells++;
+            p++;
+        } else {
+            int width = wcwidth(wc);
+            cells += width < 0 ? 1 : width;
+            p += n;
         }
     }
-    printf("%s\n", formatted_message);
+    int padding = isatty(STDOUT_FILENO) ? terminal_columns() - 1 - cells : 0;
+    printf("%*s%s\n", padding > 0 ? padding : 0, "", text);
 }

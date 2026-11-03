@@ -124,6 +124,7 @@ static int login_client(int fd, Client *client)
         }
         pthread_mutex_unlock(&dispatch_mutex);
         if (result < 0) remove_client(fd);
+        else printf("[Login] %s ready; chat history and shared file sent.\n", client->username);
         return result;
     }
     if (received < 0) perror("Receiving login packet");
@@ -133,6 +134,7 @@ static int login_client(int fd, Client *client)
 
 static void notify_client(int fd, const char *message)
 {
+    printf("[Result] %s\n", message);
     Packet reply = {.flag = CHAT, .username = "Server"};
     snprintf(reply.message, sizeof(reply.message), "%s", message);
     if (send_all(fd, &reply, sizeof(reply), 0) < 0) shutdown(fd, SHUT_RDWR);
@@ -141,15 +143,19 @@ static void notify_client(int fd, const char *message)
 static void dispatch(Packet *packet, int fd)
 {
     int version;
+    const char *kind = packet->flag == CHAT ? "chat" :
+                       packet->flag == FILE_UPDATE ? "file" : "command";
+    printf("[Received] %s from %s\n", kind, packet->username);
     if (packet->flag == CHAT) {
         if (strpbrk(packet->message, "\r\n\033")) {
             notify_client(fd, "Chat must be a single line of text.");
         } else if (handle_chat_message(packet, fd) < 0) {
             perror(CHAT_LOG);
             notify_client(fd, "Could not save chat message.");
-        }
+        } else printf("[Chat] %s: %s\n", packet->username, packet->message);
     } else if (packet->flag == FILE_UPDATE) {
         if (handle_file_packet(packet, fd) < 0) notify_client(fd, "File update failed.");
+        else printf("[File] %s saved (%zu bytes).\n", SHARED_FILE, strlen(packet->file_data));
     } else if (!strcmp(packet->message, "/commit") || !strcmp(packet->message, "/commit snapshot")) {
         const char *snapshot = NULL;
         if (!strcmp(packet->message, "/commit snapshot")) {
@@ -168,10 +174,12 @@ static void dispatch(Packet *packet, int fd)
         }
     } else if (!strcmp(packet->message, "/log")) {
         if (log_versions(packet, fd) < 0) notify_client(fd, "Could not list versions.");
+        else printf("[Command] /log sent to %s.\n", packet->username);
     } else if (!strncmp(packet->message, "/rebase ", 8) &&
                parse_version(packet->message + 8, &version) == 0) {
         if (rebase_version(version, packet, -1) < 0)
             notify_client(fd, "Could not restore that version.");
+        else printf("[Command] /rebase %d completed.\n", version);
     } else {
         notify_client(fd, "Unknown command or invalid version.");
     }
@@ -260,6 +268,7 @@ static void *accept_clients(void *arg)
 
 int main(void)
 {
+    setvbuf(stdout, NULL, _IOLBF, 0);
     sigset_t signals;
     sigemptyset(&signals);
     sigaddset(&signals, SIGINT);
@@ -278,7 +287,7 @@ int main(void)
     }
     pthread_t accept_thread;
     if (pthread_create(&accept_thread, NULL, accept_clients, NULL) != 0) return EXIT_FAILURE;
-    printf("[Server] Listening on port %d...\n", PORT);
+    printf("[Server] Listening on port %d. Chat log: %s (working directory).\n", PORT, CHAT_LOG);
     int signal_number;
     sigwait(&signals, &signal_number);
     stopping = 1;
