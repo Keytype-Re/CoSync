@@ -4,8 +4,8 @@ CFLAGS = -Wall -pthread -g
 
 # 프로젝트 파일
 TARGET = server_app
-SRC = main.c common.c broadcast.c chat_handler.c version_control.c chat_handler.c login_control.c file_sync.c
-OBJ = $(SRC:.c=.o)
+SRC = main.c common.c broadcast.c chat_handler.c version_control.c login_control.c file_sync.c
+OBJ = $(SRC:.c=.o) protocol.o
 
 # 포함 디렉토리
 INCLUDES = -I./includes
@@ -17,6 +17,11 @@ all: $(TARGET)
 $(TARGET): $(OBJ)
 	$(CC) $(CFLAGS) -o $@ $^
 
+$(OBJ): ../protocol.h
+
+protocol.o: ../protocol.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
 # 개별 소스 파일 빌드
 main.o: main.c includes/common.h includes/login_control.h includes/chat_handler.h includes/file_sync.h includes/version_control.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
@@ -24,7 +29,7 @@ main.o: main.c includes/common.h includes/login_control.h includes/chat_handler.
 common.o: common.c includes/common.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
-chat_handler.o: chat_handler.c includes/chat_handler.h includes/broadcast.h
+chat_handler.o: chat_handler.c includes/chat_handler.h includes/broadcast.h includes/common.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 broadcast.o: broadcast.c includes/broadcast.h includes/common.h

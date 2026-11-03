@@ -2,6 +2,7 @@
  * @author 2023016057 조신근
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include "includes/common.h"
 #include <string.h>
@@ -11,7 +12,7 @@ int is_user_registered(const char *username)
 { // 이미 등록된 이름인지 확인
     FILE *file = fopen(USER_FILE, "r");
     if (!file)
-        return 0;
+        return errno == ENOENT ? 0 : -1;
 
     char line[BUFFER_SIZE];
     while (fgets(line, sizeof(line), file))
@@ -23,18 +24,17 @@ int is_user_registered(const char *username)
             return 1;
         }
     }
+    int failed = ferror(file);
     fclose(file);
-    return 0;
+    return failed ? -1 : 0;
 }
 
-void register_user(const char *username)
-{ // 입력한 이름으로 회원가입
+int register_user(const char *username)
+{
     FILE *file = fopen(USER_FILE, "a");
-    if (file)
-    {
-        fprintf(file, "%s\n", username);
-        fclose(file);
-    }
+    if (!file) return -1;
+    int failed = fprintf(file, "%s\n", username) < 0;
+    return fclose(file) == 0 && !failed ? 0 : -1;
 }
 
 void remove_client(int sockfd)
@@ -47,7 +47,6 @@ void remove_client(int sockfd)
         {
             printf("[Server] Client %s disconnected.\n", clients[i].username);
 
-            close(sockfd);
 
             // 연결 끊긴 클라이언트 이후의 모든 클라이언트를 앞으로 이동
             for (int j = i; j < client_count - 1; j++)

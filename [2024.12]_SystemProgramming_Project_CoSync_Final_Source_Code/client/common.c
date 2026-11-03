@@ -2,77 +2,43 @@
  * @author 2023016057 조신근
  */
 
-#include "common.h"
-#include <string.h>
+#include "includes/common.h"
+#include <errno.h>
+#include <poll.h>
 #include <stdio.h>
+#include <string.h>
+#include <unistd.h>
 
-// 전역 변수 초기화
-pthread_mutex_t global_mutex = PTHREAD_MUTEX_INITIALIZER;
+atomic_int keep_running = 1;
 pthread_mutex_t send_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-int keep_running = 1;
-
-// 작업큐
-pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
-Packet packet_queue[QUEUE_SIZE];
-int front = 0;
-int rear = 0;
-void enqueue(Packet packet) {
-    pthread_mutex_lock(&queue_mutex);
-    if ((rear + 1) % QUEUE_SIZE == front) {
-        printf("Queue is full\n");
-    } else {
-        packet_queue[rear] = packet;
-        rear = (rear + 1) % QUEUE_SIZE;
-    }
-    pthread_mutex_unlock(&queue_mutex);
-}
-
-int dequeue(Packet *packet) {
-    pthread_mutex_lock(&queue_mutex);
-    if (front == rear) {
-        pthread_mutex_unlock(&queue_mutex);
-        return 0;
-    }
-    *packet = packet_queue[front];
-    front = (front + 1) % QUEUE_SIZE;
-    pthread_mutex_unlock(&queue_mutex);
-    return 1;
-}
-
-// 전역 변수 정의
 int client_socket;
-struct sockaddr_in server_addr;
 char username[50];
+int stop_pipe[2];
 
-
-ssize_t send_all(int sockfd, const void *buffer, size_t length, int a) {
-    size_t total_sent = 0;
-    const char *ptr = (const char*)buffer;
-
-    while (total_sent < length) {
-        ssize_t sent = send(sockfd, ptr + total_sent, length - total_sent, 0);
-        if (sent <= 0) {
-            // 오류 발생 또는 연결 종료
-            return -1;
-        }
-        total_sent += sent;
+void stop_client(void)
+{
+    if (atomic_exchange(&keep_running, 0)) {
+        shutdown(client_socket, SHUT_RDWR);
+        /* Closing the sole writer wakes every poller, including future waiters. */
+        close(stop_pipe[1]);
     }
-    return total_sent;
 }
 
-ssize_t recv_all(int sockfd, void *buffer, size_t length, int a) {
-    size_t total_received = 0;
-    char *ptr = (char*)buffer;
+int wait_for_input(int fd)
+{
+    struct pollfd fds[] = {{fd, POLLIN, 0}, {stop_pipe[0], POLLIN, 0}};
+    int n;
+    do { n = poll(fds, 2, -1); } while (n < 0 && errno == EINTR);
+    return n > 0 && !fds[1].revents && (fds[0].revents & (POLLIN | POLLHUP));
+}
 
-    while (total_received < length) {
-        ssize_t received = recv(sockfd, ptr + total_received, length - total_received, 0);
-        if (received <= 0) {
-            // 오류 발생 또는 연결 종료
-            return -1;
-        }
-        total_received += received;
-    }
-    return total_received;
+int send_packet(Packet *packet)
+{
+    snprintf(packet->username, sizeof(packet->username), "%s", username);
+    pthread_mutex_lock(&send_mutex);
+    int failed = send_all(client_socket, packet, sizeof(*packet), 0) < 0;
+    pthread_mutex_unlock(&send_mutex);
+    if (failed) stop_client();
+    return failed ? -1 : 0;
 }

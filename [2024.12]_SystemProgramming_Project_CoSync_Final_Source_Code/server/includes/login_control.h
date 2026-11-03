@@ -24,7 +24,7 @@ int is_user_registered(const char *username);
  *
  * @param username 등록할 사용자 이름.
  */
-void register_user(const char *username);
+int register_user(const char *username);
 
 /**
  * @brief 클라이언트 연결을 해제하고 배열을 관리하는 함수.

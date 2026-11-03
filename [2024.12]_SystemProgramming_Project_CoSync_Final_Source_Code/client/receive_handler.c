@@ -2,34 +2,32 @@
  * @author 2023012083 김무성
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include "includes/receive_handler.h"
+#include "includes/file_monitor.h"
+#include <stdio.h>
+#include <string.h>
 
 
-void *receive_server_packet(void *arg)
+int receive_server_packets(void)
 {
-	Packet packet;
-
-	while (1)
-	{
-		if (!keep_running)
-		{
-			return NULL;
-		}
-
-		int bytes_received = recv_all(client_socket, &packet, sizeof(Packet), 0);
-
-		if (bytes_received <= 0)
-		{
-			printf("[Client] Disconnected from server.\n");
-			return NULL;
-		}
-
-		// 패킷 정보를 메인스레드의 작업큐로 보내는 코드
-		enqueue(packet);
-	}
-
-	return NULL;
+    Packet packet;
+    while (recv_all(client_socket, &packet, sizeof(packet), 0) > 0) {
+        if (packet.flag == CHAT &&
+            memchr(packet.username, 0, sizeof(packet.username)) && valid_payload(&packet)) {
+            printf("\033[2K\r");
+            print_right_aligned(packet.username, packet.message);
+        } else if (packet.flag == FILE_UPDATE && valid_payload(&packet)) {
+            if (apply_to_file(packet.file_data) < 0) break;
+            continue;
+        } else if (packet.flag == COMMAND &&
+                   memchr(packet.file_data, 0, sizeof(packet.file_data))) {
+            printf("\n[Version_Log]\n%s\n", packet.file_data);
+        } else break;
+        printf("[%s] : ", username);
+        fflush(stdout);
+    }
+    int unexpected = keep_running;
+    if (unexpected) fprintf(stderr, "Disconnected from server.\n");
+    stop_client();
+    return unexpected ? -1 : 0;
 }

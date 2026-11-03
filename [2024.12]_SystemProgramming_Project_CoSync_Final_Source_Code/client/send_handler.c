@@ -2,206 +2,85 @@
  * @author 2023012083 김무성
  */
 
+#include <errno.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <sys/ioctl.h>
+#include <unistd.h>
 #include "includes/send_handler.h"
+#include "includes/file_monitor.h"
 
-/////////////////////////////////////////////////////////// 스레드 함수 ////////////////////////////////////////////////////////////////
+static void change_file(const char *path)
+{
+    char data[BUFFER_SIZE] = "";
+    pthread_mutex_lock(&file_mutex);
+    int result = path ? read_text_file(path, data, 1) : 0;
+    if (result == 0) result = store_text_file(SHARED_FILE, data, 0);
+    pthread_mutex_unlock(&file_mutex);
+    if (result < 0) perror(path ? path : SHARED_FILE);
+}
+
+static void handle_line(const char *line)
+{
+    Packet packet = {0};
+    if (!strcmp(line, "/quit")) { stop_client(); return; }
+    if (!strcmp(line, "/help")) { command_help(); return; }
+    if (!strcmp(line, "/new")) { change_file(NULL); return; }
+    if (!strcmp(line, "/commit")) { send_current_file(1); return; }
+    if (!strcmp(line, "/load") || !strncmp(line, "/load ", 6)) {
+        const char *path = line + 5;
+        while (*path == ' ') path++;
+        if (*path) change_file(path);
+        else fprintf(stderr, "Usage: /load PATH\n");
+        return;
+    }
+    if (!strcmp(line, "/rebase") || !strncmp(line, "/rebase ", 8)) {
+        int version;
+        if (line[7] != ' ' || parse_version(line + 8, &version) < 0) {
+            fprintf(stderr, "Usage: /rebase VERSION\n");
+            return;
+        }
+        packet.flag = COMMAND;
+    } else packet.flag = !strcmp(line, "/log") ? COMMAND : CHAT;
+    strcpy(packet.message, line);
+    send_packet(&packet);
+}
+
 void *send_terminal_packet(void *arg)
 {
-	while (1)
-	{
-		char input[BUFFER_SIZE];
-		printf("[%s] : ", username);
-		fflush(stdout);
-		fgets(input, sizeof(input), stdin); // 터미널 입력 받기
-		input[strcspn(input, "\n")] = '\0'; // 개행 문자 제거
-
-		// 입력 내용에 따라 분기
-		if (strcmp(input, "/new") == 0)
-		{
-			command_new(); // shared_file.txt 초기화
-		}
-		else if (strstr(input, "/load") != NULL)
-		{
-			command_load(input); // 파일 내용 복사 및 shared_file.txt에 붙여넣기
-		}
-		else if (strcmp(input, "/commit") == 0)
-		{
-			command_commit(input);
-		}
-		else if (strstr(input, "/rebase") != NULL)
-		{
-			command_rebase(input);
-		}
-		else if (strcmp(input, "/log") == 0)
-		{
-			command_log(input);
-		}
-		else if (strcmp(input, "/quit") == 0)
-		{
-			command_quit(); // 서버와의 연결 종료
-		}
-		else if (strcmp(input, "/help") == 0)
-		{
-			command_help(); // help!!!!!!
-		}
-		else
-		{
-			send_chat_message(input); // 채팅 메시지 전송
-		}
-
-		if (!keep_running)
-		{
-			return NULL;
-		}
-	}
-
-	return NULL;
-}
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-////////////////////////////////////////////////////// 터미널 입력에 따른 분기별 함수 /////////////////////////////////////////////////////////////////////
-// /new
-void command_new()
-{
-	// 파일을 쓰기 모드로 열기
-	FILE *file = fopen(SHARED_FILE, "w"); // 쓰기 모드는 자동으로 파일 내용을 삭제
-	if (file == NULL)
-	{
-		// perror("[Error] Failed to /new");
-		return;
-	}
-
-	fclose(file);
-	printf("[Client] File '%s' newly created successfully.\n", SHARED_FILE);
-}
-
-// /load
-void command_load(const char *input)
-{
-	// 입력에서 파일 경로 추출
-	char filepath[BUFFER_SIZE];
-	sscanf(input + 6, "%s", filepath); // "/load " 이후 파일 이름 읽기
-
-	printf("[Client] Loading file from path: %s\n", filepath);
-
-	// loaded_file.txt 열기 (읽기 모드)
-	FILE *loaded_file = fopen(filepath, "r");
-	if (loaded_file == NULL)
-	{
-		// perror("[Client] Failed to open file");
-		return;
-	}
-
-	// shared_file.txt 열기 (쓰기 모드)
-	FILE *shared_file = fopen(SHARED_FILE, "w");
-	if (shared_file == NULL)
-	{
-		// perror("[Client] Failed to open shared_file.txt");
-		fclose(loaded_file);
-		return;
-	}
-
-	// 파일 내용 복사
-	char buffer[BUFFER_SIZE];
-	size_t bytes_read;
-	pthread_mutex_lock(&file_mutex); // file_mutex lock
-	while ((bytes_read = fread(buffer, 1, sizeof(buffer), loaded_file)) > 0)
-	{
-		fwrite(buffer, 1, bytes_read, shared_file);
-		// printf("쓰는 중\n");
-	}
-	pthread_mutex_unlock(&file_mutex); // file_mutex unlock
-
-	// 파일 스트림 닫기
-	fclose(loaded_file);
-	fclose(shared_file);
-
-	printf("[Client] File '%s' loaded to 'shared_file.txt' successfully.\n", filepath);
-}
-
-// commit
-void command_commit(const char *input)
-{
-	Packet packet;
-
-	memset(&packet, 0, sizeof(Packet));							 // 패킷 메모리 초기화
-	packet.flag = 3;											 // 패킷 플래그 설정 (명령어)
-	strncpy(packet.username, username, sizeof(packet.username)); // 패킷에 유저 이름 설정
-	strncpy(packet.message, input, sizeof(packet.message));		 // "/commit"
-
-	pthread_mutex_lock(&send_mutex);
-	if (send_all(client_socket, &packet, sizeof(Packet), 0) < 0)
-	{ // 전송
-	  // perror("[Client] Failed to /commit");
-	}
-	pthread_mutex_unlock(&send_mutex); // unlock
-}
-
-// rebase
-void command_rebase(const char *input)
-{
-	Packet packet;
-
-	memset(&packet, 0, sizeof(Packet));							 // 패킷 메모리 초기화
-	packet.flag = 3;											 // 패킷 플래그 설정 (명령어)
-	strncpy(packet.username, username, sizeof(packet.username)); // 패킷에 유저 이름 설정
-	strncpy(packet.message, input, sizeof(packet.message));		 // "/rebase (number)"
-
-	pthread_mutex_lock(&send_mutex);
-	if (send_all(client_socket, &packet, sizeof(Packet), 0) < 0)
-	{ // 전송
-	  // perror("[Client] Failed to /rebase");
-	}
-	pthread_mutex_unlock(&send_mutex); // unlock
-}
-
-// log
-void command_log(const char *input)
-{
-	Packet packet;
-
-	memset(&packet, 0, sizeof(Packet));							 // 패킷 메모리 초기화
-	packet.flag = 3;											 // 패킷 플래그 설정 (명령어)
-	strncpy(packet.username, username, sizeof(packet.username)); // 패킷에 유저 이름 설정
-	strncpy(packet.message, input, sizeof(packet.message));		 // "/log"
-
-	pthread_mutex_lock(&send_mutex);
-	if (send_all(client_socket, &packet, sizeof(Packet), 0) < 0)
-	{ // 전송
-	  // perror("[Client] Failed to /log");
-	}
-	pthread_mutex_unlock(&send_mutex); // unlock
-}
-
-// /quit
-void command_quit()
-{
-	keep_running = 0;
-	printf("[Client] Exiting...\n");
-	close(client_socket);
-}
-
-// 채팅 메시지 입력
-void send_chat_message(const char *input)
-{
-	Packet packet;
-
-	memset(&packet, 0, sizeof(Packet)); // 패킷 메모리 초기화
-	packet.flag = 1;					// 패킷 플래그 설정 (채팅)
-	strncpy(packet.username, username, sizeof(packet.username));
-	strncpy(packet.message, input, sizeof(packet.message));
-
-	pthread_mutex_lock(&send_mutex);
-	if (send_all(client_socket, &packet, sizeof(Packet), 0) < 0)
-	{ // 전송
-	  // perror("[Client] Failed to send_all message");
-	}
-	pthread_mutex_unlock(&send_mutex); // unlock
+    (void)arg;
+    char line[BUFFER_SIZE];
+    size_t used = 0;
+    int too_long = 0;
+    printf("[%s] : ", username);
+    fflush(stdout);
+    while (wait_for_input(STDIN_FILENO)) {
+        char c;
+        ssize_t n = read(STDIN_FILENO, &c, 1);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) {
+            if (n == 0 && used && !too_long) {
+                line[used] = 0;
+                handle_line(line);
+            }
+            break;
+        }
+        if (c != '\n') {
+            if (used < sizeof(line) - 1) line[used++] = c;
+            else too_long = 1;
+            continue;
+        }
+        line[used] = 0;
+        if (too_long) fprintf(stderr, "Input exceeds the packet limit.\n");
+        else handle_line(line);
+        used = 0;
+        too_long = 0;
+        if (!keep_running) break;
+        printf("[%s] : ", username);
+        fflush(stdout);
+    }
+    stop_client();
+    return NULL;
 }
 
 void print_centered(const char *text, int width) {
@@ -215,7 +94,7 @@ void print_centered(const char *text, int width) {
 }
 
 void command_help() {
-	struct winsize w;
+	struct winsize w = {.ws_col = 80};
     ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
     int term_width = w.ws_col; // Get terminal width
 
@@ -244,6 +123,8 @@ void command_help() {
     // 공지 사항
     printf("| %-98s |\n", "1. Use commands with correct arguments.");
     printf("| %-98s |\n", "2. You should save the shared file before using any instructions.");
+
+    printf("| %-19s | %-76s |\n", "/log", "Show saved versions");
 
     // 메뉴 하단
     printf("%.*s\n", 102, "==========================================================================================================================================\n");

@@ -20,7 +20,7 @@ void initialize_version_directory();
  * 
  * 이 함수는 현재 shared_file.txt 파일을 새로운 버전으로 저장함.
  */
-void commit_version();
+int commit_version(const char *snapshot);
 
 /**
  * @brief 버전 로그를 클라이언트에게 전송하는 함수.
@@ -30,7 +30,7 @@ void commit_version();
  * @param current_packet 현재 처리 중인 패킷.
  * @param client_sock 클라이언트 소켓 파일 디스크립터.
  */
-void log_versions(Packet *current_packet, int client_sock);
+int log_versions(Packet *current_packet, int client_sock);
 
 /**
  * @brief 특정 버전으로 파일을 복원하는 함수.
@@ -41,6 +41,6 @@ void log_versions(Packet *current_packet, int client_sock);
  * @param current_packet 현재 처리 중인 패킷.
  * @param client_sock 클라이언트 소켓 파일 디스크립터.
  */
-void rebase_version(int version_number, Packet *current_packet, int client_sock);
+int rebase_version(int version_number, Packet *current_packet, int client_sock);
 
 #endif // VERSION_CONTROL_H

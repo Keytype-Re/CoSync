@@ -2,18 +2,25 @@
  * @author 2023012083 김무성
  */
 
-#include <pthread.h>
-#include "includes/common.h"
 #include "includes/broadcast.h"
+#include <unistd.h>
 
-void broadcast_packet(Packet *packet, Client clients[], int client_count, int exclude_sock)
+/* Dispatch serializes broadcasts. Pin each destination while it is still listed. */
+void broadcast_packet(const Packet *packet, int exclude_sock)
 {
-    // 자기 자신을 제외한 연결된 모든 클라이언트에게 데이터 전송
-    for (int i = 0; i < client_count; i++)
-    {
-        if (clients[i].sockfd != exclude_sock)
-        {
-            send_all(clients[i].sockfd, packet, sizeof(Packet), 0);
-        }
+    int targets[MAX_CLIENTS];
+    int count = 0;
+    pthread_mutex_lock(&clients_mutex);
+    for (int i = 0; i < client_count; i++) {
+        if (!clients[i].ready || clients[i].sockfd == exclude_sock) continue;
+        int fd = dup(clients[i].sockfd);
+        if (fd >= 0) targets[count++] = fd;
+        else shutdown(clients[i].sockfd, SHUT_RDWR);
+    }
+    pthread_mutex_unlock(&clients_mutex);
+    for (int i = 0; i < count; i++) {
+        if (send_all(targets[i], packet, sizeof(*packet), 0) < 0)
+            shutdown(targets[i], SHUT_RDWR);
+        close(targets[i]);
     }
 }
