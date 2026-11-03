@@ -28,9 +28,11 @@ static int connect_server(void)
         return -1;
     }
     client_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (client_socket < 0) return -1;
+    if (client_socket < 0) { perror("socket"); return -1; }
     if (connect(client_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        perror("connect");
         close(client_socket);
+        client_socket = -1;
         return -1;
     }
     return 0;
@@ -72,13 +74,22 @@ static int login_client(void)
                 continue;
             }
         }
+        /* Human input must not consume the server's handshake timeout. */
+        if (connect_server() < 0) return -1;
         Packet request = {.flag = signup ? LOGIN_NEW : CHAT};
         strcpy(request.username, username);
-        if (send_all(client_socket, &request, sizeof(request), 0) < 0) return -1;
+        if (send_all(client_socket, &request, sizeof(request), 0) < 0) {
+            perror("Sending login request");
+            return -1;
+        }
         unsigned char first;
         ssize_t n;
         do { n = recv(client_socket, &first, 1, MSG_PEEK); } while (n < 0 && errno == EINTR);
-        if (n != 1) return -1;
+        if (n <= 0) {
+            if (n < 0) perror("Receiving login response");
+            else fprintf(stderr, "Server closed the connection before replying to login.\n");
+            return -1;
+        }
         if (first == 'F') {
             fprintf(stderr, "Server is full. Try again after another user disconnects.\n");
             return -1;
@@ -90,19 +101,33 @@ static int login_client(void)
             }
             return 0;
         }
+        if (first != 'D' && first != 'R') {
+            fprintf(stderr, "Unexpected registration response from server.\n");
+            return -1;
+        }
         const char *reply = first == 'D' ? "DUPLICATE" : "REGISTERED";
         char buffer[sizeof("REGISTERED")];
         size_t length = strlen(reply);
-        if (recv_all(client_socket, buffer, length, 0) <= 0 || memcmp(buffer, reply, length))
+        n = recv_all(client_socket, buffer, length, 0);
+        if (n < 0) { perror("Receiving registration response"); return -1; }
+        if (!n || memcmp(buffer, reply, length)) {
+            fprintf(stderr, "Incomplete or invalid registration response from server.\n");
             return -1;
+        }
         if (first == 'D') {
+            close(client_socket);
+            client_socket = -1;
             puts("Username already exists. Try another.");
             continue;
         }
         char record[sizeof(username) + 1];
         snprintf(record, sizeof(record), "%s\n", username);
         if (store_text_file(USER_FILE, record, 0) < 0) { perror(USER_FILE); return -1; }
-        return send_all(client_socket, "INIT_REQUEST", 12, 0) < 0 ? -1 : 0;
+        if (send_all(client_socket, "INIT_REQUEST", 12, 0) < 0) {
+            perror("Requesting initial data");
+            return -1;
+        }
+        return 0;
     }
 }
 
@@ -146,14 +171,13 @@ int main(void)
 {
     /* Login reads lines; the terminal thread subsequently polls the same fd. */
     setvbuf(stdin, NULL, _IONBF, 0);
-    if (connect_server() < 0) { perror("connect"); return EXIT_FAILURE; }
     int result = -1;
     if (mkdir("./watch", 0700) < 0 && errno != EEXIST) perror("./watch");
     else if (login_client() == 0) {
         if (receive_initial_data() == 0) result = run_session();
         else fprintf(stderr, "Could not load initial chat history and shared file.\n");
     }
-    close(client_socket);
+    if (client_socket >= 0) close(client_socket);
     return result == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 

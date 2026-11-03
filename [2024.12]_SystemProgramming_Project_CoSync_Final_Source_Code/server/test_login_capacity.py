@@ -3,6 +3,7 @@
 import os
 import ctypes
 import re
+import select
 import shutil
 import socket
 import subprocess
@@ -198,6 +199,36 @@ class CollaborationTest(unittest.TestCase):
         pending.sendall(b"x")
         self.server.terminate()
         self.assertEqual(self.server.wait(timeout=5), 0)
+
+    def test_signup_waits_for_input_and_reports_disconnect(self):
+        self.server.terminate()
+        self.assertEqual(self.server.wait(timeout=5), 0)
+        listener = self.stack.enter_context(socket.socket())
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", self.port))
+        listener.listen()
+        listener.settimeout(3)
+        proc = subprocess.Popen([self.client], cwd=self.root, stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                env={**os.environ, "COSYNC_SERVER_ADDR": "127.0.0.1"})
+        self.stack.callback(proc.wait)
+        self.stack.callback(proc.kill)
+        output = b""
+        while b"Enter your username:" not in output:
+            self.assertTrue(select.select([proc.stdout], [], [], 3)[0], "no username prompt")
+            chunk = os.read(proc.stdout.fileno(), 4096)
+            self.assertTrue(chunk, "client exited before prompting")
+            output += chunk
+        self.assertFalse(select.select([listener], [], [], 0)[0],
+                         "the server handshake started while waiting for user input")
+        proc.stdin.write(b"demo\n")
+        proc.stdin.flush()
+        conn, _ = listener.accept()
+        with conn:
+            self.assertEqual(self.packet(conn).username, b"demo")
+        _, error = proc.communicate(timeout=5)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn(b"before replying to login", error)
 
     def test_real_client_file_events(self):
         peer = self.first

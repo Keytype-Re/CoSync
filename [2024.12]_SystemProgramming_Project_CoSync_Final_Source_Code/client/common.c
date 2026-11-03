@@ -12,7 +12,7 @@
 atomic_int keep_running = 1;
 pthread_mutex_t send_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
-int client_socket;
+int client_socket = -1;
 char username[50];
 int stop_pipe[2];
 

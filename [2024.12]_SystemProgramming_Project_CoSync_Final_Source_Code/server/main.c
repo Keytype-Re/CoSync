@@ -64,9 +64,13 @@ static int send_initial_data(int fd)
 static int login_client(int fd, Client *client)
 {
     Packet request;
-    while (recv_all(fd, &request, sizeof(request), 0) > 0) {
+    ssize_t received;
+    while ((received = recv_all(fd, &request, sizeof(request), 0)) > 0) {
         if ((request.flag != LOGIN_NEW && request.flag != CHAT) ||
-            !valid_username(request.username, sizeof(request.username))) return -1;
+            !valid_username(request.username, sizeof(request.username))) {
+            fprintf(stderr, "Login rejected: invalid login packet or username.\n");
+            return -1;
+        }
         int signup = request.flag == LOGIN_NEW;
         strcpy(client->username, request.username);
         pthread_mutex_lock(&clients_mutex);
@@ -96,16 +100,23 @@ static int login_client(int fd, Client *client)
 
         if (signup) {
             char init[sizeof("INIT_REQUEST") - 1];
-            if (send_all(fd, "REGISTERED", 10, 0) < 0 ||
-                recv_all(fd, init, sizeof(init), 0) <= 0 ||
-                memcmp(init, "INIT_REQUEST", sizeof(init)) != 0) {
+            if (send_all(fd, "REGISTERED", 10, 0) < 0) {
+                perror("Sending registration response");
+                remove_client(fd);
+                return -1;
+            }
+            received = recv_all(fd, init, sizeof(init), 0);
+            if (received <= 0 || memcmp(init, "INIT_REQUEST", sizeof(init)) != 0) {
+                if (received < 0) perror("Receiving INIT_REQUEST");
+                else fprintf(stderr, "Login ended without a valid INIT_REQUEST.\n");
                 remove_client(fd);
                 return -1;
             }
         }
         pthread_mutex_lock(&dispatch_mutex);
         int result = send_initial_data(fd);
-        if (result == 0) {
+        if (result < 0) perror("Preparing or sending initial data");
+        else {
             pthread_mutex_lock(&clients_mutex);
             for (int i = 0; i < client_count; i++)
                 if (clients[i].sockfd == fd) clients[i].ready = 1;
@@ -115,6 +126,8 @@ static int login_client(int fd, Client *client)
         if (result < 0) remove_client(fd);
         return result;
     }
+    if (received < 0) perror("Receiving login packet");
+    else fprintf(stderr, "Peer disconnected before sending a login packet.\n");
     return -1;
 }
 
